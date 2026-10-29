@@ -1,6 +1,6 @@
 # Nginx Proxy Manager — Lorwell Fork
 
-![Version](https://img.shields.io/badge/version-1.4.0-green.svg)
+![Version](https://img.shields.io/badge/version-1.5.0-green.svg)
 [![Docker pulls](https://img.shields.io/docker/pulls/moailaozi/nginx-proxy-manager.svg)](https://hub.docker.com/r/moailaozi/nginx-proxy-manager)
 
 This repository is an independently maintained fork of
@@ -28,7 +28,7 @@ Install Docker, then create `docker-compose.yml`:
 ```yaml
 services:
   app:
-    image: docker.io/moailaozi/nginx-proxy-manager:1.4.0
+    image: docker.io/moailaozi/nginx-proxy-manager:1.5.0
     restart: unless-stopped
     ports:
       - "80:80"
@@ -48,7 +48,7 @@ docker compose up -d
 Open <http://127.0.0.1:81> and create the first administrator. On slower systems the first startup can take a
 minute while the database and cryptographic keys are initialized.
 
-For production, pin a full version such as `1.4.0`. The `latest` tag follows the newest stable release of this fork,
+For production, pin a full version such as `1.5.0`. The `latest` tag follows the newest stable release of this fork,
 but a pinned version makes upgrades deliberate and reversible.
 
 ## Upgrade

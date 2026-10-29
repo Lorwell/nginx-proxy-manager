@@ -33,7 +33,7 @@ Install Docker and create `docker-compose.yml`:
 ```yaml
 services:
   app:
-    image: docker.io/moailaozi/nginx-proxy-manager:1.4.0
+    image: docker.io/moailaozi/nginx-proxy-manager:1.5.0
     restart: unless-stopped
     environment:
       TZ: "Asia/Shanghai"

@@ -21,7 +21,7 @@ This fork has an independent `1.x` release line. Do not switch the Compose image
 Use a full version tag in `docker-compose.yml`, for example:
 
 ```yaml
-image: docker.io/moailaozi/nginx-proxy-manager:1.4.0
+image: docker.io/moailaozi/nginx-proxy-manager:1.5.0
 ```
 
 Change it to the intended newer tag, then run:
@@ -41,7 +41,7 @@ Database migrations run automatically when the backend starts. This fork also st
 artifacts. Legacy proxy-host options are normalized to the current schema where they can be represented safely; rows
 that require review retain migration status/backup information instead of being silently discarded.
 
-Product versions such as `1.4.0`, database migration filenames and Nginx configuration schema/profile versions are
+Product versions such as `1.5.0`, database migration filenames and Nginx configuration schema/profile versions are
 separate version domains. Do not edit migration filenames or stored schema versions to match the product release.
 
 ## Rollback

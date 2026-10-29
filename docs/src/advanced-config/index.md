@@ -14,7 +14,7 @@ on the `data` and `letsencrypt` folders at startup.
 ```yml
 services:
   app:
-    image: 'docker.io/moailaozi/nginx-proxy-manager:1.4.0'
+    image: 'docker.io/moailaozi/nginx-proxy-manager:1.5.0'
     environment:
       PUID: 1000
       PGID: 1000
@@ -101,7 +101,7 @@ secrets:
 
 services:
   app:
-    image: 'docker.io/moailaozi/nginx-proxy-manager:1.4.0'
+    image: 'docker.io/moailaozi/nginx-proxy-manager:1.5.0'
     restart: unless-stopped
     ports:
       # Public HTTP Port:
