@@ -97,6 +97,20 @@ export type AccessListClient = {
 	meta?: Record<string, any>;
 };
 
+export type CertificateActivationStatus = "verified" | "mismatch" | "stale" | "unverified" | "skipped";
+
+export interface CertificateActivation {
+	status: CertificateActivationStatus;
+	checkedOn?: string | null;
+	domain?: string | null;
+	synthetic?: boolean;
+	servedFingerprint?: string | null;
+	expectedFingerprint?: string | null;
+	servedNotAfter?: string | null;
+	databaseNotAfter?: string | null;
+	detail?: string | null;
+}
+
 export interface Certificate {
 	id: number;
 	createdOn: string;
@@ -106,7 +120,7 @@ export interface Certificate {
 	niceName: string;
 	domainNames: string[];
 	expiresOn: string;
-	meta: Record<string, any>;
+	meta: Record<string, any> & { activation?: CertificateActivation };
 	owner?: User;
 	proxyHosts?: ProxyHost[];
 	deadHosts?: DeadHost[];

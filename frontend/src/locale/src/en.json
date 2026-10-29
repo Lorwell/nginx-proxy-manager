@@ -146,6 +146,27 @@
 	"certificate": {
 		"defaultMessage": "Certificate"
 	},
+	"certificate.activation.checked-on": {
+		"defaultMessage": "Checked"
+	},
+	"certificate.activation.mismatch": {
+		"defaultMessage": "Not in effect"
+	},
+	"certificate.activation.skipped": {
+		"defaultMessage": "Not checked"
+	},
+	"certificate.activation.stale": {
+		"defaultMessage": "Panel data stale"
+	},
+	"certificate.activation.synthetic": {
+		"defaultMessage": "Synthetic wildcard probe"
+	},
+	"certificate.activation.unverified": {
+		"defaultMessage": "Unverified"
+	},
+	"certificate.activation.verified": {
+		"defaultMessage": "In effect"
+	},
 	"certificate.custom-certificate": {
 		"defaultMessage": "Certificate"
 	},
@@ -250,6 +271,9 @@
 	},
 	"column.access": {
 		"defaultMessage": "Access"
+	},
+	"column.activation": {
+		"defaultMessage": "Activation"
 	},
 	"column.authorization": {
 		"defaultMessage": "Authorization"

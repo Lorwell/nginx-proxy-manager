@@ -3,6 +3,7 @@ import { createColumnHelper, getCoreRowModel, useReactTable } from "@tanstack/re
 import { useMemo } from "react";
 import type { Certificate } from "src/api/backend";
 import {
+	CertificateActivationFormatter,
 	CertificateInUseFormatter,
 	DateFormatter,
 	DomainsFormatter,
@@ -78,6 +79,14 @@ export default function Table({ data, isFetching, onDelete, onRenew, onDownload,
 				header: intl.formatMessage({ id: "column.expires" }),
 				cell: (info: any) => {
 					return <DateFormatter value={info.getValue()} highlightPast />;
+				},
+			}),
+			columnHelper.accessor((row: any) => row, {
+				id: "activation",
+				header: intl.formatMessage({ id: "column.activation" }),
+				cell: (info: any) => {
+					const r = info.getValue();
+					return <CertificateActivationFormatter activation={r.meta?.activation} />;
 				},
 			}),
 			columnHelper.accessor((row: any) => row, {

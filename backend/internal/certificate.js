@@ -16,6 +16,7 @@ import certificateModel from "../models/certificate.js";
 import tokenModel from "../models/token.js";
 import userModel from "../models/user.js";
 import internalAuditLog from "./audit-log.js";
+import certificateServing from "./certificate-serving.js";
 import internalHost from "./host.js";
 import internalNginx from "./nginx.js";
 
@@ -28,12 +29,23 @@ const omissions = () => {
 	return ["is_deleted", "owner.is_deleted", "meta.dns_provider_credentials"];
 };
 
+// Command failures from execFile carry the useful text in stderr, not message.
+const describeError = (err) => `${err?.message || err?.stderr || err?.code || err || "unknown error"}`.trim();
+
 const internalCertificate = {
 	allowedSslFiles: ["certificate", "certificate_key", "intermediate_certificate"],
 	intervalTimeout: 1000 * 60 * 60, // 1 hour
 	interval: null,
 	intervalProcessing: false,
 	renewBeforeExpirationBy: [30, "days"],
+	servingCheckTimeout: 1000 * 60 * 10, // 10 minutes
+	servingCheckInterval: null,
+	servingCheckProcessing: false,
+	servingCheckDelay: 1000 * 60, // give nginx a chance to start first
+	servingHealCooldown: 1000 * 60 * 30, // 30 minutes
+	servingHealAt: new Map(),
+	servingStates: new Map(),
+	activationRetryDelay: 500,
 
 	initTimer: () => {
 		logger.info("Let's Encrypt Renewal Timer initialized");
@@ -43,6 +55,29 @@ const internalCertificate = {
 		);
 		// And do this now as well
 		internalCertificate.processExpiringHosts();
+
+		// nginx caches ssl_certificate in memory, so a successful renewal is only
+		// half the job. Keep verifying what the edge actually serves even when the
+		// renewal happened outside this process (manual certbot, restored backup,
+		// a reload that silently did not happen).
+		if (process.env.CERTIFICATE_SERVING_CHECK !== "false") {
+			const servingCheckTimeout =
+				Number.parseInt(process.env.CERTIFICATE_SERVING_CHECK_INTERVAL_MS || "", 10) ||
+				internalCertificate.servingCheckTimeout;
+
+			logger.info(`Certificate serving check initialized (every ${servingCheckTimeout}ms)`);
+			internalCertificate.servingCheckInterval = setInterval(
+				internalCertificate.checkServingCertificates,
+				servingCheckTimeout,
+			);
+			internalCertificate.servingCheckInterval.unref?.();
+
+			const firstCheck = setTimeout(
+				internalCertificate.checkServingCertificates,
+				internalCertificate.servingCheckDelay,
+			);
+			firstCheck.unref?.();
+		}
 	},
 
 	/**
@@ -620,6 +655,7 @@ const internalCertificate = {
 
 		certificate.meta = row.meta;
 		await internalCertificate.writeCustomCert(certificate);
+		await internalNginx.reload();
 		return _.pick(row.meta, internalCertificate.allowedSslFiles);
 	},
 
@@ -920,10 +956,335 @@ const internalCertificate = {
 				meta: updatedCertificate,
 			});
 
+			// Renewal only writes files. nginx keeps the certificate it parsed in
+			// memory until it is reloaded, so the renewal is not complete until the
+			// renewed material is actually being served.
+			await internalCertificate.activate(updatedCertificate);
+
 			return updatedCertificate;
 		}
 
 		throw new error.ValidationError("Only Let'sEncrypt certificates can be renewed");
+	},
+
+	/**
+	 * Makes a renewed certificate visible to the running nginx and proves it.
+	 *
+	 * The reload is retried a few times because it can race with a concurrent
+	 * deployment. The serving probe then compares the certificate nginx actually
+	 * presents with the renewed file on disk. Activation failure is reported but
+	 * never causes another issuance: the certificate material itself is valid, and
+	 * the DB expiry has already been updated, so the renewal timer will not pick
+	 * the certificate up again.
+	 *
+	 * @param   {Object}  certificate
+	 * @returns {Promise}
+	 */
+	activate: async (certificate) => {
+		const attempts = 3;
+		let lastError = null;
+
+		for (let attempt = 1; attempt <= attempts; attempt++) {
+			try {
+				await internalNginx.reload();
+			} catch (err) {
+				lastError = err;
+				logger.error(
+					`Certificate #${certificate.id}: nginx reload failed (attempt ${attempt}/${attempts}): ` +
+						describeError(err),
+				);
+				if (attempt < attempts) await internalCertificate.waitBeforeActivationRetry(attempt);
+				continue;
+			}
+
+			let verification;
+			try {
+				verification = await internalCertificate.verifyServedCertificate(certificate);
+			} catch (err) {
+				lastError = err;
+				logger.error(`Certificate #${certificate.id}: serving verification failed: ${describeError(err)}`);
+				if (attempt < attempts) await internalCertificate.waitBeforeActivationRetry(attempt);
+				continue;
+			}
+
+			if (verification.status === "mismatch") {
+				lastError = new Error(verification.message);
+				logger.error(`Certificate #${certificate.id}: ${verification.message}`);
+				if (attempt < attempts) await internalCertificate.waitBeforeActivationRetry(attempt);
+				continue;
+			}
+
+			const reconciled = await internalCertificate.reconcileActivation(certificate, verification);
+			internalCertificate.logActivationResult(certificate, reconciled);
+			return reconciled;
+		}
+
+		const message =
+			`Certificate #${certificate.id} was renewed but nginx is not serving it: ` +
+			`${describeError(lastError)}`;
+		logger.error(message);
+
+		await internalCertificate.persistActivation(certificate, {
+			status: "mismatch",
+			message: describeError(lastError),
+		});
+
+		const activationError = new error.ValidationError(message);
+		activationError.error_code = "CERTIFICATE_NOT_ACTIVATED";
+		throw activationError;
+	},
+
+	/**
+	 * @param   {Number}  attempt
+	 * @returns {Promise}
+	 */
+	waitBeforeActivationRetry: (attempt) => {
+		if (internalCertificate.activationRetryDelay <= 0) {
+			return Promise.resolve();
+		}
+		return new Promise((resolve) => setTimeout(resolve, internalCertificate.activationRetryDelay * attempt));
+	},
+
+	/**
+	 * Compares the renewed file with the certificate the local nginx presents and
+	 * with the expiry stored in the database.
+	 *
+	 * @param   {Object}  certificate
+	 * @returns {Promise}
+	 */
+	verifyServedCertificate: (certificate) =>
+		certificateServing.verify(certificate, {
+			liveCertPath: internalCertificate.getCertPath(certificate),
+		}),
+
+	/**
+	 * The database expiry is derived metadata: when nginx and the renewed file
+	 * agree, the certificate is in effect and the stored expiry should describe
+	 * that same certificate. Refresh it if it does not.
+	 *
+	 * @param   {Object}  certificate
+	 * @param   {Object}  verification
+	 * @returns {Promise}
+	 */
+	refreshExpiryFromServed: async (certificate, verification) => {
+		const servedMs = verification.servedNotAfter ? new Date(verification.servedNotAfter).getTime() : NaN;
+		if (Number.isNaN(servedMs)) {
+			return false;
+		}
+
+		const expiresOn = moment(servedMs).format("YYYY-MM-DD HH:mm:ss");
+
+		try {
+			await certificateModel.query().patchAndFetchById(certificate.id, { expires_on: expiresOn });
+		} catch (err) {
+			logger.error(
+				`Certificate #${certificate.id}: could not refresh the stored expiry: ${describeError(err)}`,
+			);
+			return false;
+		}
+
+		certificate.expires_on = expiresOn;
+		logger.warn(
+			`Certificate #${certificate.id}: stored expiry refreshed from the served certificate (${expiresOn})`,
+		);
+		return true;
+	},
+
+	/**
+	 * Turns a raw verification into the state persisted for the UI.
+	 *
+	 * @param   {Object}  certificate
+	 * @param   {Object}  verification
+	 * @returns {Promise}
+	 */
+	reconcileActivation: async (certificate, verification) => {
+		let result = verification;
+
+		if (result.status === "stale") {
+			const refreshed = await internalCertificate.refreshExpiryFromServed(certificate, result);
+			result = { ...result, status: refreshed ? "verified" : "stale", databaseRefreshed: refreshed };
+		}
+
+		await internalCertificate.persistActivation(certificate, result);
+		return result;
+	},
+
+	/**
+	 * Stores the last activation result on the certificate row so the UI can show
+	 * whether the page's data matches what nginx actually serves.
+	 *
+	 * @param   {Object}  certificate
+	 * @param   {Object}  verification
+	 * @returns {Promise}
+	 */
+	persistActivation: async (certificate, verification) => {
+		const activation = {
+			status: verification.status,
+			checked_on: moment().format("YYYY-MM-DD HH:mm:ss"),
+			domain: verification.domain || null,
+			synthetic: Boolean(verification.synthetic),
+			served_fingerprint: verification.servedFingerprint || null,
+			expected_fingerprint: verification.expectedFingerprint || null,
+			served_not_after: verification.servedNotAfter || null,
+			database_not_after: verification.databaseNotAfter || null,
+			detail: verification.message || verification.reason || null,
+		};
+
+		const meta = _.assign({}, internalCertificate.cleanMeta(_.clone(certificate.meta || {})), {
+			activation,
+		});
+
+		try {
+			const updated = await certificateModel.query().patchAndFetchById(certificate.id, { meta });
+			certificate.meta = updated?.meta || meta;
+		} catch (err) {
+			logger.error(`Certificate #${certificate.id}: failed to store activation state: ${describeError(err)}`);
+		}
+
+		return activation;
+	},
+
+	/**
+	 * @param   {Object}  certificate
+	 * @param   {Object}  verification
+	 */
+	logActivationResult: (certificate, verification) => {
+		if (verification.status === "verified") {
+			logger.info(
+				`Certificate #${certificate.id}: nginx is serving the renewed certificate on ${verification.domain}` +
+					(verification.synthetic ? " (synthetic wildcard probe)" : ""),
+			);
+		} else if (verification.status === "unverified") {
+			logger.warn(
+				`Certificate #${certificate.id}: nginx reloaded, but serving could not be verified: ${verification.message}`,
+			);
+		} else if (verification.status === "skipped") {
+			logger.info(`Certificate #${certificate.id}: nginx reloaded; no probeable host (${verification.reason})`);
+		} else {
+			logger.warn(`Certificate #${certificate.id}: activation finished with status ${verification.status}`);
+		}
+	},
+
+	/**
+	 * Periodic drift check. A certificate may have been renewed outside the API
+	 * (manual certbot, restored volume) or a reload may have silently not taken
+	 * effect; both leave the DB and the edge describing different certificates.
+	 *
+	 * @param   {Object}  certificate
+	 * @returns {Promise}
+	 */
+	checkServingCertificate: async (certificate) => {
+		let verification = await internalCertificate.verifyServedCertificate(certificate);
+
+		if (verification.status === "mismatch") {
+			const now = Date.now();
+			const lastHeal = internalCertificate.servingHealAt.get(certificate.id) || 0;
+
+			if (now - lastHeal < internalCertificate.servingHealCooldown) {
+				verification = await internalCertificate.reconcileActivation(certificate, verification);
+				internalCertificate.noteServingState(
+					certificate.id,
+					"mismatch",
+					`${verification.message} (reload already attempted)`,
+				);
+				return verification;
+			}
+
+			internalCertificate.servingHealAt.set(certificate.id, now);
+			logger.error(`Certificate #${certificate.id}: ${verification.message}; reloading nginx to converge`);
+
+			try {
+				await internalNginx.reload();
+			} catch (err) {
+				verification = await internalCertificate.reconcileActivation(certificate, verification);
+				internalCertificate.noteServingState(
+					certificate.id,
+					"mismatch",
+					`reload failed: ${describeError(err)}`,
+				);
+				return verification;
+			}
+
+			verification = await internalCertificate.verifyServedCertificate(certificate);
+			if (verification.status === "verified") {
+				logger.info(`Certificate #${certificate.id}: reload converged; nginx now serves the renewed certificate`);
+			} else {
+				logger.error(
+					`Certificate #${certificate.id}: still not serving the renewed certificate after reload: ` +
+						(verification.message || verification.status),
+				);
+			}
+		}
+
+		verification = await internalCertificate.reconcileActivation(certificate, verification);
+
+		if (verification.status === "unverified") {
+			internalCertificate.noteServingState(certificate.id, "unverified", verification.message);
+			return verification;
+		}
+
+		internalCertificate.noteServingState(
+			certificate.id,
+			verification.status,
+			verification.reason || verification.message,
+		);
+		return verification;
+	},
+
+	/**
+	 * Logs certificate serving state only when it changes, so a persistent drift
+	 * does not flood the logs every check interval.
+	 *
+	 * @param   {Number}  certificateId
+	 * @param   {String}  state
+	 * @param   {String}  [detail]
+	 */
+	noteServingState: (certificateId, state, detail) => {
+		const previous = internalCertificate.servingStates.get(certificateId);
+		if (previous === state) {
+			return;
+		}
+
+		internalCertificate.servingStates.set(certificateId, state);
+
+		if (state === "verified") {
+			logger.info(`Certificate #${certificateId}: serving check passed`);
+		} else if (state === "skipped") {
+			logger.info(`Certificate #${certificateId}: serving check skipped (${detail})`);
+		} else if (state === "unverified") {
+			logger.warn(`Certificate #${certificateId}: serving check could not be verified (${detail})`);
+		} else {
+			logger.error(`Certificate #${certificateId}: serving check failed (${detail})`);
+		}
+	},
+
+	/**
+	 * Verifies every Let's Encrypt certificate currently in use.
+	 *
+	 * @returns {Promise}
+	 */
+	checkServingCertificates: async () => {
+		if (internalCertificate.servingCheckProcessing) {
+			return;
+		}
+
+		internalCertificate.servingCheckProcessing = true;
+
+		try {
+			const certificates = await certificateModel.query().where("is_deleted", 0);
+
+			for (const certificate of certificates) {
+				try {
+					await internalCertificate.checkServingCertificate(certificate);
+				} catch (err) {
+					internalCertificate.noteServingState(certificate.id, "unverified", describeError(err));
+				}
+			}
+		} catch (err) {
+			logger.error(`Certificate serving check failed: ${describeError(err)}`);
+		} finally {
+			internalCertificate.servingCheckProcessing = false;
+		}
 	},
 
 	/**
@@ -1261,6 +1622,13 @@ const internalCertificate = {
 
 	getLiveCertPath: (certificateId) => {
 		return `/etc/letsencrypt/live/npm-${certificateId}`;
+	},
+
+	getCertPath: (certificate) => {
+		if (certificate.provider === "letsencrypt") {
+			return `/etc/letsencrypt/live/npm-${certificate.id}`;
+		}
+		return `/data/custom_ssl/npm-${certificate.id}`;
 	},
 };
 

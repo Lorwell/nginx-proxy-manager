@@ -11,6 +11,7 @@ vi.mock("src/components", () => {
 	const Value = (props: Record<string, unknown>) => <span>{String(props.value ?? props.email ?? props.name ?? "value")}</span>;
 	return {
 		AccessListFormatter: Value,
+		CertificateActivationFormatter: Value,
 		CertificateFormatter: Value,
 		CertificateInUseFormatter: Value,
 		DateFormatter: Value,

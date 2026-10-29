@@ -77,6 +77,27 @@
 	"certificate": {
 		"defaultMessage": "证书"
 	},
+	"certificate.activation.checked-on": {
+		"defaultMessage": "检查时间"
+	},
+	"certificate.activation.mismatch": {
+		"defaultMessage": "未生效"
+	},
+	"certificate.activation.skipped": {
+		"defaultMessage": "未检查"
+	},
+	"certificate.activation.stale": {
+		"defaultMessage": "面板数据过期"
+	},
+	"certificate.activation.synthetic": {
+		"defaultMessage": "通配符合成探测"
+	},
+	"certificate.activation.unverified": {
+		"defaultMessage": "未验证"
+	},
+	"certificate.activation.verified": {
+		"defaultMessage": "已生效"
+	},
 	"certificate.custom-certificate": {
 		"defaultMessage": "证书"
 	},
@@ -178,6 +199,9 @@
 	},
 	"column.access": {
 		"defaultMessage": "访问"
+	},
+	"column.activation": {
+		"defaultMessage": "生效状态"
 	},
 	"column.authorization": {
 		"defaultMessage": "授权"

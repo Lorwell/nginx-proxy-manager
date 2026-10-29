@@ -126,8 +126,10 @@ test("certificate metadata, validation and upload helpers sanitize certificate m
 	assert.deepEqual(service.cleanMeta({ ...meta }), { certificate: true, certificate_key: true, intermediate_certificate: true, dns_provider_credentials: "SECRET" });
 	assert.deepEqual(service.cleanMeta({ ...meta }, true), { dns_provider_credentials: "SECRET" });
 	assert.equal(service.getLiveCertPath(12), "/etc/letsencrypt/live/npm-12");
+	assert.equal(service.getCertPath({ id: 12, provider: "letsencrypt" }), "/etc/letsencrypt/live/npm-12");
+	assert.equal(service.getCertPath({ id: 12, provider: "other" }), "/data/custom_ssl/npm-12");
 
-	const originals = { key: service.checkPrivateKey, info: service.getCertificateInfo, get: service.get, validate: service.validate, update: service.update, write: service.writeCustomCert };
+	const originals = { key: service.checkPrivateKey, info: service.getCertificateInfo, get: service.get, validate: service.validate, update: service.update, write: service.writeCustomCert, reload: nginx.reload };
 	service.checkPrivateKey = async () => true;
 	service.getCertificateInfo = async (content) => ({ cn: content, dates: { to: 2_000_000_000 } });
 	try {
@@ -147,6 +149,7 @@ test("certificate metadata, validation and upload helpers sanitize certificate m
 		service.validate = async () => ({ certificate: { cn: "new.example.test", dates: { to: 2_000_000_000 } } });
 		service.update = async (_access, data) => ({ ...data, provider: "other" });
 		service.writeCustomCert = async (certificate) => assert.equal(certificate.meta.certificate, "CERT");
+		nginx.reload = async () => {};
 		const uploaded = await service.upload(access(), { id: 4, files: { certificate: { data: Buffer.from("CERT") }, certificate_key: { data: Buffer.from("KEY") } } });
 		assert.deepEqual(uploaded, { certificate: "CERT", certificate_key: "KEY" });
 	} finally {
@@ -156,6 +159,7 @@ test("certificate metadata, validation and upload helpers sanitize certificate m
 		service.validate = originals.validate;
 		service.update = originals.update;
 		service.writeCustomCert = originals.write;
+		nginx.reload = originals.reload;
 	}
 });
 
@@ -237,7 +241,7 @@ test("certificate OpenSSL parser returns certificate identity and rejects invali
 });
 
 test("certificate renewal and certbot command helpers select HTTP and DNS behavior", async () => {
-	const originals = { execFile: utils.execFile, exec: utils.exec, additional: service.getAdditionalCertbotArgs, get: service.get, renewHttp: service.renewLetsEncryptSsl, renewDns: service.renewLetsEncryptSslWithDnsChallenge, info: service.getCertificateInfoFromFile, query: certificateModel.query, audit: audit.add };
+	const originals = { execFile: utils.execFile, exec: utils.exec, additional: service.getAdditionalCertbotArgs, get: service.get, renewHttp: service.renewLetsEncryptSsl, renewDns: service.renewLetsEncryptSslWithDnsChallenge, info: service.getCertificateInfoFromFile, query: certificateModel.query, audit: audit.add, reload: nginx.reload, verify: service.verifyServedCertificate };
 	const commands = [];
 	utils.execFile = async (command, args, opts) => { commands.push({ command, args, opts }); return "ok"; };
 	utils.exec = async (command) => commands.push({ command });
@@ -262,7 +266,10 @@ test("certificate renewal and certbot command helpers select HTTP and DNS behavi
 		service.getCertificateInfoFromFile = async () => ({ dates: { to: 2_000_000_000 } });
 		certificateModel.query = () => ({ patchAndFetchById: async (_id, data) => ({ id: 4, ...data }) });
 		audit.add = async () => true;
+		nginx.reload = async () => commands.push({ command: "reload" });
+		service.verifyServedCertificate = async () => ({ status: "skipped", reason: "no probeable host in test" });
 		assert.equal((await service.renew(access(), { id: 4 })).id, 4);
+		assert.ok(commands.some((item) => item.command === "reload"));
 	} finally {
 		utils.execFile = originals.execFile;
 		utils.exec = originals.exec;
@@ -273,6 +280,8 @@ test("certificate renewal and certbot command helpers select HTTP and DNS behavi
 		service.getCertificateInfoFromFile = originals.info;
 		certificateModel.query = originals.query;
 		audit.add = originals.audit;
+		nginx.reload = originals.reload;
+		service.verifyServedCertificate = originals.verify;
 	}
 });
 
@@ -487,5 +496,201 @@ test("certificate DNS request installs provider, writes credentials and builds p
 		else process.env.CERTBOT_VERSION = originals.certbotVersion;
 		if (typeof originals.aws === "undefined") delete process.env.AWS_CONFIG_FILE;
 		else process.env.AWS_CONFIG_FILE = originals.aws;
+	}
+});
+
+test("certificate renewal reloads nginx and verifies the served certificate before reporting success", async () => {
+	const originals = {
+		query: certificateModel.query,
+		get: service.get,
+		renew: service.renewLetsEncryptSsl,
+		info: service.getCertificateInfoFromFile,
+		verify: service.verifyServedCertificate,
+		reload: nginx.reload,
+		audit: audit.add,
+		retryDelay: service.activationRetryDelay,
+	};
+	const operations = [];
+	const patches = [];
+	const certificate = {
+		id: 5,
+		provider: "letsencrypt",
+		domain_names: ["portal.example.test"],
+		meta: {},
+		expires_on: "2026-01-01 00:00:00",
+	};
+
+	certificateModel.query = () => ({
+		patchAndFetchById: async (_id, data) => {
+			operations.push("patch");
+			patches.push(data);
+			return { ...certificate, ...data };
+		},
+	});
+	service.get = async () => certificate;
+	service.renewLetsEncryptSsl = async () => operations.push("renew");
+	service.getCertificateInfoFromFile = async () => ({ dates: { to: 2_000_000_000 } });
+	service.verifyServedCertificate = async () => {
+		operations.push("verify");
+		return { status: "verified", domain: "portal.example.test" };
+	};
+	audit.add = async () => operations.push("audit");
+	nginx.reload = async () => operations.push("reload");
+	service.activationRetryDelay = 0;
+
+	try {
+		const renewed = await service.renew(access(), { id: 5 });
+
+		assert.deepEqual(operations, ["renew", "patch", "audit", "reload", "verify", "patch"]);
+		assert.match(renewed.expires_on, /^2033-/);
+
+		const activation = patches.at(-1).meta.activation;
+		assert.equal(activation.status, "verified");
+		assert.equal(activation.domain, "portal.example.test");
+		assert.match(activation.checked_on, /^\d{4}-\d{2}-\d{2} /);
+
+		// A reload that keeps failing must surface as an activation error, but the
+		// renewed expiry is already stored: the hourly timer must not force another
+		// issuance while nginx is the thing that is broken.
+		operations.length = 0;
+		nginx.reload = async () => {
+			operations.push("reload");
+			throw new Error("nginx reload failed");
+		};
+
+		await assert.rejects(
+			() => service.renew(access(), { id: 5 }),
+			(err) => err.error_code === "CERTIFICATE_NOT_ACTIVATED" && /renewed but nginx is not serving it/.test(err.message),
+		);
+		assert.deepEqual(operations, ["renew", "patch", "audit", "reload", "reload", "reload", "patch"]);
+	} finally {
+		certificateModel.query = originals.query;
+		service.get = originals.get;
+		service.renewLetsEncryptSsl = originals.renew;
+		service.getCertificateInfoFromFile = originals.info;
+		service.verifyServedCertificate = originals.verify;
+		nginx.reload = originals.reload;
+		audit.add = originals.audit;
+		service.activationRetryDelay = originals.retryDelay;
+	}
+});
+
+test("certificate serving check reloads nginx once when the edge serves a stale certificate", async () => {
+	const originals = {
+		verify: service.verifyServedCertificate,
+		persist: service.persistActivation,
+		reload: nginx.reload,
+		states: service.servingStates,
+		heal: service.servingHealAt,
+		cooldown: service.servingHealCooldown,
+	};
+	const operations = [];
+	let verification = 0;
+
+	service.verifyServedCertificate = async () => {
+		verification += 1;
+		return verification === 1
+			? { status: "mismatch", message: "nginx serves the previous certificate" }
+			: { status: "verified", domain: "portal.example.test" };
+	};
+	nginx.reload = async () => operations.push("reload");
+	service.persistActivation = async () => ({});
+	service.servingStates = new Map();
+	service.servingHealAt = new Map();
+
+	try {
+		const result = await service.checkServingCertificate({ id: 5 });
+
+		assert.equal(result.status, "verified");
+		assert.deepEqual(operations, ["reload"]);
+		assert.equal(service.servingStates.get(5), "verified");
+
+		// Within the cooldown a second mismatch is reported but not healed again.
+		service.verifyServedCertificate = async () => ({ status: "mismatch", message: "still stale" });
+		service.servingStates.set(5, "verified");
+		await service.checkServingCertificate({ id: 5 });
+		assert.deepEqual(operations, ["reload"]);
+	} finally {
+		service.verifyServedCertificate = originals.verify;
+		service.persistActivation = originals.persist;
+		nginx.reload = originals.reload;
+		service.servingStates = originals.states;
+		service.servingHealAt = originals.heal;
+		service.servingHealCooldown = originals.cooldown;
+	}
+});
+
+test("certificate serving check refreshes a stale database expiry from the served certificate", async () => {
+	const originals = {
+		query: certificateModel.query,
+		verify: service.verifyServedCertificate,
+		persist: service.persistActivation,
+		states: service.servingStates,
+	};
+	const certificate = { id: 5, expires_on: "2026-10-28 21:28:00", meta: {} };
+	const writes = [];
+
+	service.verifyServedCertificate = async () => ({
+		status: "stale",
+		domain: "portal.example.test",
+		servedNotAfter: "Dec 27 12:45:19 2026 GMT",
+		servedFingerprint: "AA",
+		expectedFingerprint: "AA",
+		databaseNotAfter: certificate.expires_on,
+		databaseMatch: false,
+	});
+	service.persistActivation = async (_certificate, verification) => {
+		writes.push(["activation", verification.status]);
+	};
+	certificateModel.query = () => ({
+		patchAndFetchById: async (_id, data) => {
+			writes.push(["expiry", data.expires_on]);
+			return { ...certificate, ...data };
+		},
+	});
+	service.servingStates = new Map();
+
+	try {
+		const result = await service.checkServingCertificate(certificate);
+
+		assert.equal(result.status, "verified");
+		assert.equal(result.databaseRefreshed, true);
+		assert.match(writes[0][1], /^2026-12-27 \d{2}:45:19$/);
+		assert.deepEqual(writes[1], ["activation", "verified"]);
+		assert.match(certificate.expires_on, /^2026-12-27 \d{2}:45:19$/);
+	} finally {
+		certificateModel.query = originals.query;
+		service.verifyServedCertificate = originals.verify;
+		service.persistActivation = originals.persist;
+		service.servingStates = originals.states;
+	}
+});
+
+test("certificate serving sweep checks every Let's Encrypt certificate once at a time", async () => {
+	const originals = {
+		query: certificateModel.query,
+		check: service.checkServingCertificate,
+		processing: service.servingCheckProcessing,
+	};
+	const checked = [];
+
+	certificateModel.query = () => ({
+		where: () => Promise.resolve([{ id: 1 }, { id: 2 }]),
+	});
+	service.checkServingCertificate = async (certificate) => checked.push(certificate.id);
+	service.servingCheckProcessing = false;
+
+	try {
+		await service.checkServingCertificates();
+		assert.deepEqual(checked, [1, 2]);
+		assert.equal(service.servingCheckProcessing, false);
+
+		service.servingCheckProcessing = true;
+		await service.checkServingCertificates();
+		assert.deepEqual(checked, [1, 2], "a running sweep must not overlap");
+	} finally {
+		certificateModel.query = originals.query;
+		service.checkServingCertificate = originals.check;
+		service.servingCheckProcessing = originals.processing;
 	}
 });

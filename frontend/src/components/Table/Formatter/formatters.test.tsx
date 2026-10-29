@@ -16,6 +16,7 @@ vi.mock("src/components", () => ({
 }));
 
 import { AccessListFormatter } from "./AccessListformatter";
+import { CertificateActivationFormatter } from "./CertificateActivationFormatter";
 import { CertificateFormatter } from "./CertificateFormatter";
 import { CertificateInUseFormatter } from "./CertificateInUseFormatter";
 import { DateFormatter } from "./DateFormatter";
@@ -60,6 +61,37 @@ describe("table formatters", () => {
 		expect(screen.getByText("certificate.in-use")).toBeInTheDocument();
 	});
 
+	it("formats certificate activation states and their details", () => {
+		const { container, rerender } = render(<CertificateActivationFormatter />);
+		expect(container.textContent).toContain("—");
+
+		for (const [status, label] of [
+			["verified", "certificate.activation.verified"],
+			["mismatch", "certificate.activation.mismatch"],
+			["stale", "certificate.activation.stale"],
+			["unverified", "certificate.activation.unverified"],
+			["skipped", "certificate.activation.skipped"],
+		] as const) {
+			rerender(<CertificateActivationFormatter activation={{ status }} />);
+			expect(screen.getByText(label)).toBeInTheDocument();
+		}
+
+		rerender(
+			<CertificateActivationFormatter
+				activation={{
+					status: "verified",
+					checkedOn: "2026-10-29 11:30:00",
+					domain: "portal.example.test",
+					synthetic: true,
+					servedNotAfter: "Dec 27 12:45:19 2026 GMT",
+					servedFingerprint: "AA:BB",
+					expectedFingerprint: "AA:BB",
+				}}
+			/>,
+		);
+		fireEvent.mouseOver(screen.getByText("certificate.activation.verified"));
+		expect(screen.getByText(/portal\.example\.test/)).toBeInTheDocument();
+	});
 	it("formats dates, domains, emails, avatars, roles, booleans and values", () => {
 		const date = render(<DateFormatter value="2020-01-01" highlightPast />);
 		expect(date.container.querySelector(".text-danger")).toBeInTheDocument();
