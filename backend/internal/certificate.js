@@ -1067,7 +1067,7 @@ const internalCertificate = {
 	 * @returns {Promise}
 	 */
 	refreshExpiryFromServed: async (certificate, verification) => {
-		const servedMs = verification.servedNotAfter ? new Date(verification.servedNotAfter).getTime() : NaN;
+		const servedMs = verification.servedNotAfter ? new Date(verification.servedNotAfter).getTime() : Number.NaN;
 		if (Number.isNaN(servedMs)) {
 			return false;
 		}
